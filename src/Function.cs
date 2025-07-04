@@ -13,44 +13,85 @@ using Yandex.Cloud.Functions;
 
 namespace GGroupp;
 
-public class Function : YcFunction<ProxyRequest, ProxyResponse>
+public sealed class Function : YcFunction<string, ProxyResponse>
 {
     private static readonly HttpClient HttpClient = new();
+
     private static readonly ProxyService ProxyService = new(HttpClient);
 
-    public ProxyResponse FunctionHandler(ProxyRequest request, Context context)
+    private static readonly ServiceProvider ServiceProvider = CreateServiceProvider();
+
+    private static readonly ILogger Logger = ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger<Function>();
+
+    private static readonly IConfiguration Configuration = ServiceProvider.GetRequiredService<IConfiguration>();
+
+    public ProxyResponse FunctionHandler(string request, Context context)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(request?.Url) || string.IsNullOrWhiteSpace(request?.Method))
-            {
-                return ProxyResponse.Error("Invalid request parameters", 400);
-            }
             if (string.IsNullOrWhiteSpace(context?.TokenJson))
             {
                 return ProxyResponse.Error("Invalid IAM token", 500);
             }
 
-            using var serviceProvider = CreateServiceProvider();
-            var logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger<Function>();
-            var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+            var proxyRequest = ParseProxyRequest(request);
+            Logger.LogInformation("Received request: {proxyRequest}", proxyRequest);
 
             var token = ExtractToken(context.TokenJson);
-            logger.LogInformation("Extracted token: {token}", token[..10]);
-            return ProxyService.ForwardRequestAsync(request, token).Result;
+            Logger.LogInformation("Extracted token: {token}", token[..10]);
+
+            return ProxyService.ForwardRequestAsync(proxyRequest, token).GetAwaiter().GetResult();
         }
-        catch (Exception ex)
+        catch (ArgumentException e)
         {
-            return ProxyResponse.Error($"Request processing failed: {ex.Message}");
+            return ProxyResponse.Error(e.Message, 400);
         }
+        catch (Exception e)
+        {
+            return ProxyResponse.Error($"Request processing failed: {e.Message}");
+        }
+    }
+
+    private static ProxyRequest ParseProxyRequest(string requestString)
+    {
+        if (string.IsNullOrWhiteSpace(requestString))
+        {
+            throw new ArgumentNullException(nameof(requestString), "Request payload cannot be empty.");
+        }
+
+        using var jsonDoc = JsonDocument.Parse(requestString);
+        var root = jsonDoc.RootElement;
+
+        ProxyRequest? proxyRequest;
+
+        if (root.TryGetProperty("body", out var bodyElement))
+        {
+            var bodyString = bodyElement.GetString();
+            if (string.IsNullOrWhiteSpace(bodyString))
+            {
+                throw new ArgumentException("Request body is empty.", nameof(requestString));
+            }
+            proxyRequest = JsonSerializer.Deserialize<ProxyRequest>(bodyString, JsonSerializerOptions.Web);
+        }
+        else
+        {
+            proxyRequest = JsonSerializer.Deserialize<ProxyRequest>(requestString, JsonSerializerOptions.Web);
+        }
+
+        if (proxyRequest is null || string.IsNullOrWhiteSpace(proxyRequest.Url) || string.IsNullOrWhiteSpace(proxyRequest.Method))
+        {
+            throw new ArgumentException("Request Method and Url are required.", nameof(requestString));
+        }
+
+        return proxyRequest;
     }
 
     private static string ExtractToken(string tokenJson)
     {
-        var tokenData = JsonSerializer.Deserialize<TokenData>(tokenJson, JsonSerializerOptions.Default);
+        var tokenData = JsonSerializer.Deserialize<TokenData>(tokenJson, JsonSerializerOptions.Web);
 
         if (tokenData?.AccessToken == null)
-            throw new InvalidOperationException("Invalid IAM token received");
+            throw new ArgumentException("Invalid IAM token: AccessToken is missing.", nameof(tokenJson));
 
         return tokenData.AccessToken;
     }
@@ -95,22 +136,25 @@ internal sealed class ProxyService(HttpClient httpClient)
                 IsSuccess = httpResponse.IsSuccessStatusCode
             };
         }
-        catch (HttpRequestException ex)
+        catch (HttpRequestException e)
         {
-            return ProxyResponse.Error($"HTTP request failed: {ex.Message}");
+            return ProxyResponse.Error($"HTTP request failed: {e.Message}");
         }
-        catch (Exception ex)
+        catch (Exception e)
         {
-            return ProxyResponse.Error($"Request processing failed: {ex.Message}");
+            return ProxyResponse.Error($"Request processing failed: {e.Message}");
         }
     }
 
     private static HttpRequestMessage BuildHttpRequest(ProxyRequest request, string token)
     {
-        var httpRequest = new HttpRequestMessage(new HttpMethod(request.Method), request.Url);
+        if (string.IsNullOrWhiteSpace(request?.Method) || string.IsNullOrWhiteSpace(request?.Url))
+        {
+            throw new ArgumentException("Request Method and Url are required.");
+        }
+        var httpRequest = new HttpRequestMessage(new(request.Method), request.Url);
 
         AddContent(httpRequest, request);
-        AddHeaders(httpRequest, request.Headers);
         AddAuthHeader(httpRequest, token);
 
         return httpRequest;
@@ -132,24 +176,6 @@ internal sealed class ProxyService(HttpClient httpClient)
         httpRequest.Content = content;
     }
 
-    private static void AddHeaders(HttpRequestMessage httpRequest, Dictionary<string, string>? headers)
-    {
-        if (headers is null)
-        {
-            return;
-        }
-
-        foreach (var header in headers)
-        {
-            if (header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            httpRequest.Headers.TryAddWithoutValidation(header.Key, header.Value);
-        }
-    }
-
     private static void AddAuthHeader(HttpRequestMessage httpRequest, string token)
     {
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -158,12 +184,16 @@ internal sealed class ProxyService(HttpClient httpClient)
 
 public sealed record class ProxyRequest
 {
-    public string Url { get; init; } = string.Empty;
+    [JsonPropertyName("url")]
+    public string? Url { get; init; }
 
-    public string Method { get; init; } = "GET";
+    [JsonPropertyName("method")]
+    public string? Method { get; init; }
 
+    [JsonPropertyName("body")]
     public string? Body { get; init; }
 
+    [JsonPropertyName("headers")]
     public Dictionary<string, string>? Headers { get; init; }
 }
 
@@ -171,7 +201,7 @@ public sealed record class ProxyResponse
 {
     public int StatusCode { get; init; }
 
-    public string Body { get; init; } = string.Empty;
+    public string? Body { get; init; }
 
     public bool IsSuccess { get; init; }
 
