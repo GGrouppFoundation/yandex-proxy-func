@@ -3,11 +3,12 @@ using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using Yandex.Cloud.Functions;
 
 namespace GGroupp;
@@ -21,6 +22,15 @@ public class Function : YcFunction<ProxyRequest, ProxyResponse>
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(request?.Url) || string.IsNullOrWhiteSpace(request?.Method))
+            {
+                return ProxyResponse.Error("Invalid request parameters", 400);
+            }
+            if (string.IsNullOrWhiteSpace(context?.TokenJson))
+            {
+                return ProxyResponse.Error("Invalid IAM token", 500);
+            }
+
             using var serviceProvider = CreateServiceProvider();
             var logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger<Function>();
             var configuration = serviceProvider.GetRequiredService<IConfiguration>();
@@ -31,18 +41,18 @@ public class Function : YcFunction<ProxyRequest, ProxyResponse>
         }
         catch (Exception ex)
         {
-            return ProxyResponse.Error(ex.Message);
+            return ProxyResponse.Error($"Request processing failed: {ex.Message}");
         }
     }
 
     private static string ExtractToken(string tokenJson)
     {
-        var tokenData = JsonConvert.DeserializeObject<TokenData>(tokenJson);
+        var tokenData = JsonSerializer.Deserialize<TokenData>(tokenJson, JsonSerializerOptions.Default);
 
-        if (tokenData?.access_token == null)
+        if (tokenData?.AccessToken == null)
             throw new InvalidOperationException("Invalid IAM token received");
 
-        return tokenData.access_token;
+        return tokenData.AccessToken;
     }
     private static ServiceProvider CreateServiceProvider()
     {
@@ -65,15 +75,12 @@ public class Function : YcFunction<ProxyRequest, ProxyResponse>
         .Build();
 }
 
-public class ProxyService(HttpClient httpClient)
+internal sealed class ProxyService(HttpClient httpClient)
 {
     private readonly HttpClient _httpClient = httpClient;
 
     public async Task<ProxyResponse> ForwardRequestAsync(ProxyRequest request, string token)
     {
-        if (!IsValidRequest(request))
-            return ProxyResponse.Error("Invalid request parameters", 400);
-
         try
         {
             using var httpRequest = BuildHttpRequest(request, token);
@@ -98,12 +105,6 @@ public class ProxyService(HttpClient httpClient)
         }
     }
 
-    private static bool IsValidRequest(ProxyRequest request)
-    {
-        return !string.IsNullOrWhiteSpace(request.Url) &&
-               !string.IsNullOrWhiteSpace(request.Method);
-    }
-
     private static HttpRequestMessage BuildHttpRequest(ProxyRequest request, string token)
     {
         var httpRequest = new HttpRequestMessage(new HttpMethod(request.Method), request.Url);
@@ -118,10 +119,11 @@ public class ProxyService(HttpClient httpClient)
     private static void AddContent(HttpRequestMessage httpRequest, ProxyRequest request)
     {
         if (string.IsNullOrEmpty(request.Body))
+        {
             return;
+        }
 
         var content = new StringContent(request.Body, Encoding.UTF8);
-
         if (request.Headers?.TryGetValue("Content-Type", out var contentType) == true)
         {
             content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
@@ -132,13 +134,17 @@ public class ProxyService(HttpClient httpClient)
 
     private static void AddHeaders(HttpRequestMessage httpRequest, Dictionary<string, string>? headers)
     {
-        if (headers == null)
+        if (headers is null)
+        {
             return;
+        }
 
         foreach (var header in headers)
         {
             if (header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
+            {
                 continue;
+            }
 
             httpRequest.Headers.TryAddWithoutValidation(header.Key, header.Value);
         }
@@ -150,41 +156,42 @@ public class ProxyService(HttpClient httpClient)
     }
 }
 
-public class ProxyRequest
+public sealed record class ProxyRequest
 {
-    public string Url { get; set; } = string.Empty;
+    public string Url { get; init; } = string.Empty;
 
-    public string Method { get; set; } = "GET";
+    public string Method { get; init; } = "GET";
 
-    public string? Body { get; set; }
+    public string? Body { get; init; }
 
-    public Dictionary<string, string>? Headers { get; set; }
+    public Dictionary<string, string>? Headers { get; init; }
 }
 
-public class ProxyResponse
+public sealed record class ProxyResponse
 {
-    public int StatusCode { get; set; }
+    public int StatusCode { get; init; }
 
-    public string Body { get; set; } = string.Empty;
+    public string Body { get; init; } = string.Empty;
 
-    public bool IsSuccess { get; set; }
+    public bool IsSuccess { get; init; }
 
     public static ProxyResponse Error(string message, int statusCode = 500)
-    {
-        return new ProxyResponse
+        => new()
         {
             StatusCode = statusCode,
             Body = message,
             IsSuccess = false
         };
-    }
 }
 
-public class TokenData
+public sealed record class TokenData
 {
-    public string? access_token { get; set; }
+    [JsonPropertyName("access_token")]
+    public string? AccessToken { get; init; }
 
-    public int expires_in { get; set; }
+    [JsonPropertyName("expires_in")]
+    public int ExpiresIn { get; init; }
 
-    public string? token_type { get; set; }
+    [JsonPropertyName("token_type")]
+    public string? TokenType { get; init; }
 }
