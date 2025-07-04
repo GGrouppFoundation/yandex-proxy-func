@@ -3,22 +3,30 @@ using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
-using System.Text.Json;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
 using Yandex.Cloud.Functions;
 
 namespace GGroupp;
 
-public class Handler : YcFunction<ProxyRequest, ProxyResponse>
+public class Function : YcFunction<ProxyRequest, ProxyResponse>
 {
-    private static readonly HttpClient HttpClient = new HttpClient();
-    private static readonly ProxyService ProxyService = new ProxyService(HttpClient);
+    private static readonly HttpClient HttpClient = new();
+    private static readonly ProxyService ProxyService = new(HttpClient);
 
     public ProxyResponse FunctionHandler(ProxyRequest request, Context context)
     {
         try
         {
+            using var serviceProvider = CreateServiceProvider();
+            var logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger<Function>();
+            var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+
             var token = ExtractToken(context.TokenJson);
+            logger.LogInformation("Extracted token: {token}", token[..10]);
             return ProxyService.ForwardRequestAsync(request, token).Result;
         }
         catch (Exception ex)
@@ -29,23 +37,37 @@ public class Handler : YcFunction<ProxyRequest, ProxyResponse>
 
     private static string ExtractToken(string tokenJson)
     {
-        var tokenData = JsonSerializer.Deserialize<TokenData>(tokenJson);
+        var tokenData = JsonConvert.DeserializeObject<TokenData>(tokenJson);
 
         if (tokenData?.access_token == null)
             throw new InvalidOperationException("Invalid IAM token received");
 
         return tokenData.access_token;
     }
+    private static ServiceProvider CreateServiceProvider()
+    {
+        var services = new ServiceCollection()
+            .AddLogging(InnerConfigureLogger)
+            .AddSingleton(BuildConfiguration());
+
+        return services.BuildServiceProvider();
+
+        static void InnerConfigureLogger(ILoggingBuilder builder)
+        {
+            builder = builder.AddConsole();
+        }
+    }
+
+    private static IConfiguration BuildConfiguration()
+        =>
+        new ConfigurationBuilder()
+        .AddEnvironmentVariables()
+        .Build();
 }
 
-public class ProxyService
+public class ProxyService(HttpClient httpClient)
 {
-    private readonly HttpClient _httpClient;
-
-    public ProxyService(HttpClient httpClient)
-    {
-        _httpClient = httpClient;
-    }
+    private readonly HttpClient _httpClient = httpClient;
 
     public async Task<ProxyResponse> ForwardRequestAsync(ProxyRequest request, string token)
     {
@@ -62,7 +84,7 @@ public class ProxyService
             return new ProxyResponse
             {
                 StatusCode = (int)httpResponse.StatusCode,
-                Body = ParseResponseBody(responseBody),
+                Body = responseBody,
                 IsSuccess = httpResponse.IsSuccessStatusCode
             };
         }
@@ -126,36 +148,25 @@ public class ProxyService
     {
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
     }
-
-    private static object ParseResponseBody(string responseBody)
-    {
-        if (string.IsNullOrWhiteSpace(responseBody))
-            return new { };
-
-        try
-        {
-            using var document = JsonDocument.Parse(responseBody);
-            return JsonSerializer.Deserialize<object>(document.RootElement.GetRawText()) ?? new { };
-        }
-        catch (JsonException)
-        {
-            return responseBody;
-        }
-    }
 }
 
 public class ProxyRequest
 {
     public string Url { get; set; } = string.Empty;
+
     public string Method { get; set; } = "GET";
+
     public string? Body { get; set; }
+
     public Dictionary<string, string>? Headers { get; set; }
 }
 
 public class ProxyResponse
 {
     public int StatusCode { get; set; }
-    public object Body { get; set; } = new { };
+
+    public string Body { get; set; } = string.Empty;
+
     public bool IsSuccess { get; set; }
 
     public static ProxyResponse Error(string message, int statusCode = 500)
@@ -163,7 +174,7 @@ public class ProxyResponse
         return new ProxyResponse
         {
             StatusCode = statusCode,
-            Body = new { error = message },
+            Body = message,
             IsSuccess = false
         };
     }
@@ -172,6 +183,8 @@ public class ProxyResponse
 public class TokenData
 {
     public string? access_token { get; set; }
+
     public int expires_in { get; set; }
+
     public string? token_type { get; set; }
 }
