@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -13,11 +14,13 @@ using Yandex.Cloud.Functions;
 
 namespace GGroupp;
 
-public sealed class Function : YcFunction<string, ProxyResponse>
+public sealed class Function : YcFunction<string, Task<ProxyResponse>>
 {
     private static readonly HttpClient HttpClient = new();
 
     private static readonly ProxyService ProxyService = new(HttpClient);
+
+    private static readonly TokenService TokenService = new(HttpClient);
 
     private static readonly ServiceProvider ServiceProvider = CreateServiceProvider();
 
@@ -25,22 +28,15 @@ public sealed class Function : YcFunction<string, ProxyResponse>
 
     private static readonly IConfiguration Configuration = ServiceProvider.GetRequiredService<IConfiguration>();
 
-    public ProxyResponse FunctionHandler(string request, Context context)
+    public async Task<ProxyResponse> FunctionHandler(string request, Context context)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(context?.TokenJson))
-            {
-                return ProxyResponse.Error("Invalid IAM token", 500);
-            }
-
             var proxyRequest = ParseProxyRequest(request);
-            Logger.LogInformation("Received request: {proxyRequest}", proxyRequest);
 
-            var token = ExtractToken(context.TokenJson);
-            Logger.LogInformation("Extracted token: {token}", token[..10]);
+            var token = await TokenService.GetValidTokenAsync(Configuration, Logger);
 
-            return ProxyService.ForwardRequestAsync(proxyRequest, token).GetAwaiter().GetResult();
+            return await ProxyService.ForwardRequestAsync(proxyRequest, token);
         }
         catch (ArgumentException e)
         {
@@ -86,15 +82,6 @@ public sealed class Function : YcFunction<string, ProxyResponse>
         return proxyRequest;
     }
 
-    private static string ExtractToken(string tokenJson)
-    {
-        var tokenData = JsonSerializer.Deserialize<TokenData>(tokenJson, JsonSerializerOptions.Web);
-
-        if (tokenData?.AccessToken == null)
-            throw new ArgumentException("Invalid IAM token: AccessToken is missing.", nameof(tokenJson));
-
-        return tokenData.AccessToken;
-    }
     private static ServiceProvider CreateServiceProvider()
     {
         var services = new ServiceCollection()
@@ -114,6 +101,84 @@ public sealed class Function : YcFunction<string, ProxyResponse>
         new ConfigurationBuilder()
         .AddEnvironmentVariables()
         .Build();
+}
+
+internal sealed class TokenService(HttpClient httpClient)
+{
+    private readonly HttpClient _httpClient = httpClient;
+
+    private static readonly SemaphoreSlim _semaphore = new(1, 1);
+
+    private static string? _cachedToken;
+
+    private static DateTime _tokenExpiresAt;
+
+    public async Task<string> GetValidTokenAsync(IConfiguration configuration, ILogger logger)
+    {
+        if (_cachedToken is not null && DateTime.UtcNow < _tokenExpiresAt.AddMinutes(-5))
+        {
+            return _cachedToken;
+        }
+
+        await _semaphore.WaitAsync();
+        try
+        {
+            if (_cachedToken is not null && DateTime.UtcNow < _tokenExpiresAt.AddMinutes(-5))
+            {
+                return _cachedToken;
+            }
+
+
+            var oauthToken = configuration["YANDEX_OAUTH_TOKEN"];
+            if (string.IsNullOrWhiteSpace(oauthToken))
+            {
+                throw new ArgumentException("YANDEX_OAUTH_TOKEN environment variable is not set or empty.");
+            }
+
+            logger.LogInformation("Requesting new token");
+            var iamTokenResponse = await RequestIamTokenAsync(oauthToken);
+
+
+            _cachedToken = iamTokenResponse.IamToken;
+            _tokenExpiresAt = iamTokenResponse.ExpiresAt;
+
+            return iamTokenResponse.IamToken;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    private async Task<IamTokenResponse> RequestIamTokenAsync(string oauthToken)
+    {
+        var request = new IamTokenRequest { YandexPassportOauthToken = oauthToken };
+        var json = JsonSerializer.Serialize(request, JsonSerializerOptions.Web);
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "https://iam.api.cloud.yandex.net/iam/v1/tokens")
+        {
+            Content = content
+        };
+
+        using var httpResponse = await _httpClient.SendAsync(httpRequest);
+
+        var responseBody = await httpResponse.Content.ReadAsStringAsync();
+
+        if (!httpResponse.IsSuccessStatusCode)
+        {
+            throw new ArgumentException("OAuth token used in configuration is invalid or expired.");
+        }
+
+        var iamTokenResponse = JsonSerializer.Deserialize<IamTokenResponse>(responseBody, JsonSerializerOptions.Web);
+
+        if (iamTokenResponse?.IamToken == null)
+        {
+            throw new ArgumentException("Invalid IAM token response: IamToken is missing.");
+        }
+
+        return iamTokenResponse;
+    }
 }
 
 internal sealed class ProxyService(HttpClient httpClient)
@@ -155,6 +220,7 @@ internal sealed class ProxyService(HttpClient httpClient)
         var httpRequest = new HttpRequestMessage(new(request.Method), request.Url);
 
         AddContent(httpRequest, request);
+        AddHeaders(httpRequest, request);
         AddAuthHeader(httpRequest, token);
 
         return httpRequest;
@@ -174,6 +240,29 @@ internal sealed class ProxyService(HttpClient httpClient)
         }
 
         httpRequest.Content = content;
+    }
+
+    private static void AddHeaders(HttpRequestMessage httpRequest, ProxyRequest request)
+    {
+        if (request.Headers is null)
+        {
+            return;
+        }
+
+        foreach (var header in request.Headers)
+        {
+            if (string.Equals(header.Key, "Content-Type", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (string.Equals(header.Key, "Authorization", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            httpRequest.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
     }
 
     private static void AddAuthHeader(HttpRequestMessage httpRequest, string token)
@@ -209,19 +298,22 @@ public sealed record class ProxyResponse
         => new()
         {
             StatusCode = statusCode,
-            Body = message,
+            Body = JsonSerializer.Serialize(new { error = message }, JsonSerializerOptions.Web),
             IsSuccess = false
         };
 }
 
-public sealed record class TokenData
+public sealed record class IamTokenRequest
 {
-    [JsonPropertyName("access_token")]
-    public string? AccessToken { get; init; }
+    [JsonPropertyName("yandexPassportOauthToken")]
+    public string YandexPassportOauthToken { get; init; } = string.Empty;
+}
 
-    [JsonPropertyName("expires_in")]
-    public int ExpiresIn { get; init; }
+public sealed record class IamTokenResponse
+{
+    [JsonPropertyName("iamToken")]
+    public string IamToken { get; init; } = string.Empty;
 
-    [JsonPropertyName("token_type")]
-    public string? TokenType { get; init; }
+    [JsonPropertyName("expiresAt")]
+    public DateTime ExpiresAt { get; init; }
 }
