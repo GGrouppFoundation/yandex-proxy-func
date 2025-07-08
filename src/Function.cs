@@ -115,7 +115,7 @@ internal sealed class TokenService(HttpClient httpClient)
 
     public async Task<string> GetValidTokenAsync(IConfiguration configuration, ILogger logger)
     {
-        if (_cachedToken is not null && DateTime.UtcNow < _tokenExpiresAt.AddMinutes(-5))
+        if (_cachedToken is not null && DateTime.UtcNow < _tokenExpiresAt)
         {
             return _cachedToken;
         }
@@ -123,7 +123,7 @@ internal sealed class TokenService(HttpClient httpClient)
         await _semaphore.WaitAsync();
         try
         {
-            if (_cachedToken is not null && DateTime.UtcNow < _tokenExpiresAt.AddMinutes(-5))
+            if (_cachedToken is not null && DateTime.UtcNow < _tokenExpiresAt)
             {
                 return _cachedToken;
             }
@@ -140,7 +140,7 @@ internal sealed class TokenService(HttpClient httpClient)
 
 
             _cachedToken = iamTokenResponse.IamToken;
-            _tokenExpiresAt = iamTokenResponse.ExpiresAt;
+            _tokenExpiresAt = iamTokenResponse.ExpiresAt.AddMinutes(-1);
 
             return iamTokenResponse.IamToken;
         }
