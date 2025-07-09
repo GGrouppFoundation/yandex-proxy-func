@@ -12,15 +12,12 @@ partial class YandexIamTokenHttpHandler
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         var iamToken = await GetIamTokenAsync(cancellationToken);
-        if (string.IsNullOrEmpty(iamToken) is false)
-        {
-            request.Headers.Authorization = new(BearerScheme, iamToken);
-        }
+        request.Headers.Authorization = new(BearerScheme, iamToken);
 
         return await base.SendAsync(request, cancellationToken);
     }
 
-    private async Task<string?> GetIamTokenAsync(CancellationToken cancellationToken)
+    private async Task<string> GetIamTokenAsync(CancellationToken cancellationToken)
     {
         var cachedToken = GetCachedIamToken();
         if (string.IsNullOrEmpty(cachedToken) is false)
@@ -60,7 +57,7 @@ partial class YandexIamTokenHttpHandler
             var token = await response.Content.ReadFromJsonAsync<IamTokenJson>(JsonSerializerOptions.Web, cancellationToken);
             SaveTokenIntoCache(token);
 
-            return token.IamToken;
+            return token.IamToken.OrEmpty();
         }
         finally
         {

@@ -9,7 +9,7 @@ public sealed record class ProxySendIn
 
     public string? Method { get; init; }
 
-    public JsonElement? Body { get; init; }
-
     public Dictionary<string, string>? Headers { get; init; }
+
+    public JsonElement? Body { get; init; }
 }
