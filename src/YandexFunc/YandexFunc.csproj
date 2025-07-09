@@ -15,7 +15,7 @@
     <PackageReference Include="EarlyFuncPack.Core.AsyncPipeline" Version="0.3.0" />
     <PackageReference Include="GarageGroup.Infra.Http.Api" Version="0.3.0" />
     <PackageReference Include="GarageGroup.Infra.Http.Polly" Version="2.0.1" />
-    <PackageReference Include="GGroupp.Infra.Yandex.Handler" Version="0.0.2" />
+    <PackageReference Include="GGroupp.Infra.Yandex.Handler" Version="0.0.3" />
     <PackageReference Include="System.Net.Http.Json" Version="9.0.7" />
   </ItemGroup>
 
