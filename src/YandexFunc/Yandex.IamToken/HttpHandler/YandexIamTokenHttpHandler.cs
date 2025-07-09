@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Net.Http;
 
 namespace GGroupp.Yandex.Proxy;
@@ -11,9 +12,11 @@ internal sealed partial class YandexIamTokenHttpHandler : DelegatingHandler
         =
         new("https://iam.api.cloud.yandex.net/iam/v1/tokens");
 
-    private readonly YandexIamTokenOption option;
+    private static readonly ConcurrentDictionary<string, IamTokenJson> cachedTokens
+        =
+        new();
 
-    private volatile IamTokenJson? cachedToken;
+    private readonly YandexIamTokenOption option;
 
     internal YandexIamTokenHttpHandler(HttpMessageHandler innerHandler, YandexIamTokenOption option)
         : base(innerHandler)
@@ -25,7 +28,7 @@ internal sealed partial class YandexIamTokenHttpHandler : DelegatingHandler
         public required string YandexPassportOauthToken { get; init; }
     }
 
-    private sealed record class IamTokenJson
+    private readonly record struct IamTokenJson
     {
         public string? IamToken { get; init; }
 

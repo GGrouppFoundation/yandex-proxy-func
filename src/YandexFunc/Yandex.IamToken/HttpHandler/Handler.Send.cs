@@ -22,14 +22,15 @@ partial class YandexIamTokenHttpHandler
 
     private async Task<string?> GetIamTokenAsync(CancellationToken cancellationToken)
     {
-        if (cachedToken?.ExpiresAt < (DateTimeOffset.Now - option.ExpirationDelta))
+        var oauthToken = option.PassportOauthToken;
+        if (cachedTokens.TryGetValue(oauthToken, out var cached) && cached.ExpiresAt > (DateTimeOffset.Now + option.ExpirationDelta))
         {
-            return cachedToken?.IamToken;
+            return cached.IamToken;
         }
 
         var content = new RequestJson
         {
-            YandexPassportOauthToken = option.PassportOauthToken
+            YandexPassportOauthToken = oauthToken
         };
 
         using var request = new HttpRequestMessage
@@ -46,7 +47,9 @@ partial class YandexIamTokenHttpHandler
             throw new InvalidOperationException($"Failed to get iamToken. Status: '{response.StatusCode}'. Body: '{body}'.");
         }
 
-        cachedToken = await response.Content.ReadFromJsonAsync<IamTokenJson>(JsonSerializerOptions.Web, cancellationToken);
-        return cachedToken?.IamToken;
+        var token = await response.Content.ReadFromJsonAsync<IamTokenJson>(JsonSerializerOptions.Web, cancellationToken);
+        cachedTokens.AddOrUpdate(oauthToken, token, (_, _) => token);
+
+        return token.IamToken;
     }
 }
