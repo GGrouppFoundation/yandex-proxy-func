@@ -22,34 +22,49 @@ partial class YandexIamTokenHttpHandler
 
     private async Task<string?> GetIamTokenAsync(CancellationToken cancellationToken)
     {
-        var oauthToken = option.PassportOauthToken;
-        if (cachedTokens.TryGetValue(oauthToken, out var cached) && cached.ExpiresAt > (DateTimeOffset.Now + option.ExpirationDelta))
+        var cachedToken = GetCachedIamToken();
+        if (string.IsNullOrEmpty(cachedToken) is false)
         {
-            return cached.IamToken;
+            return cachedToken;
         }
 
-        var content = new RequestJson
-        {
-            YandexPassportOauthToken = oauthToken
-        };
+        await Semaphore.WaitAsync(cancellationToken);
 
-        using var request = new HttpRequestMessage
+        try
         {
-            Method = HttpMethod.Post,
-            RequestUri = YandexIamTokenGetUri,
-            Content = JsonContent.Create(content, default, JsonSerializerOptions.Web)
-        };
+            cachedToken = GetCachedIamToken();
+            if (string.IsNullOrEmpty(cachedToken) is false)
+            {
+                return cachedToken;
+            }
 
-        var response = await base.SendAsync(request, cancellationToken);
-        if (response.IsSuccessStatusCode is false)
-        {
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new InvalidOperationException($"Failed to get iamToken. Status: '{response.StatusCode}'. Body: '{body}'.");
+            var content = new RequestJson
+            {
+                YandexPassportOauthToken = option.PassportOauthToken
+            };
+
+            using var request = new HttpRequestMessage
+            {
+                Method = HttpMethod.Post,
+                RequestUri = YandexIamTokenGetUri,
+                Content = JsonContent.Create(content, default, JsonSerializerOptions.Web)
+            };
+
+            var response = await base.SendAsync(request, cancellationToken);
+            if (response.IsSuccessStatusCode is false)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new InvalidOperationException($"Failed to get iamToken. Status: '{response.StatusCode}'. Body: '{body}'.");
+            }
+
+            var token = await response.Content.ReadFromJsonAsync<IamTokenJson>(JsonSerializerOptions.Web, cancellationToken);
+            SaveTokenIntoCache(token);
+
+            return token.IamToken;
         }
-
-        var token = await response.Content.ReadFromJsonAsync<IamTokenJson>(JsonSerializerOptions.Web, cancellationToken);
-        cachedTokens.AddOrUpdate(oauthToken, token, (_, _) => token);
-
-        return token.IamToken;
+        finally
+        {
+            Semaphore.Release();
+        }
     }
 }
