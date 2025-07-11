@@ -11,7 +11,7 @@ public static class Application
         =>
         PrimaryHandler.UseStandardSocketsHttpHandler()
         .UseLogging("ProxyApi")
-        .UseYandexIamToken("YANDEX_OAUTH_TOKEN")
+        .UseYandexIamToken("Yandex")
         .UsePollyStandard()
         .UseHttpApi()
         .UseProxySendHandler();
